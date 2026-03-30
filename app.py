@@ -6,7 +6,6 @@ import datetime
 import re
 from dotenv import load_dotenv
 import markdown2
-from fpdf import FPDF
 
 # Load environment variables from .env file
 load_dotenv()
@@ -20,71 +19,133 @@ st.set_page_config(page_title="🔍 Agentic Deep Researcher", layout="wide")
 
 def _markdown_to_pdf_bytes(report: str) -> bytes:
     """
-    Convert a markdown report string to PDF bytes using fpdf2.
-    Simple approach: render all text preserving structure, minimal formatting.
+    Convert a markdown report string to PDF bytes using reportlab.
+    Renders all content reliably without layout issues.
     """
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=10)
-    pdf.add_page()
-    pdf.set_margins(10, 10, 10)
+    from io import BytesIO
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+    from reportlab.lib.enums import TA_LEFT
     
-    # Set default font
-    pdf.set_font("Helvetica", size=10)
-
+    # Create PDF in memory
+    pdf_buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        pdf_buffer,
+        pagesize=letter,
+        topMargin=0.5*inch,
+        bottomMargin=0.5*inch,
+        leftMargin=0.75*inch,
+        rightMargin=0.75*inch
+    )
+    
+    # Define styles
+    styles = getSampleStyleSheet()
+    
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=16,
+        textColor='black',
+        spaceAfter=12,
+        leading=20
+    )
+    
+    heading2_style = ParagraphStyle(
+        'CustomHeading2',
+        parent=styles['Heading2'],
+        fontSize=13,
+        textColor='black',
+        spaceAfter=8,
+        leading=16
+    )
+    
+    heading3_style = ParagraphStyle(
+        'CustomHeading3',
+        parent=styles['Heading3'],
+        fontSize=11,
+        textColor='black',
+        spaceAfter=6,
+        leading=13,
+        fontName='Helvetica-Bold'
+    )
+    
+    body_style = ParagraphStyle(
+        'CustomBody',
+        parent=styles['BodyText'],
+        fontSize=10,
+        spaceAfter=6,
+        leading=12
+    )
+    
+    bullet_style = ParagraphStyle(
+        'CustomBullet',
+        parent=styles['BodyText'],
+        fontSize=10,
+        leftIndent=20,
+        spaceAfter=3,
+        leading=12
+    )
+    
+    # Build content list
+    story = []
+    
     for raw_line in report.splitlines():
         line = raw_line.rstrip()
         
-        # Empty lines
+        # Skip empty lines (spacer handled below)
         if not line:
-            pdf.ln(3)
+            story.append(Spacer(1, 0.1*inch))
             continue
         
-        # Determine formatting and strip markdown
-        font_style = ""
-        font_size = 10
+        # Clean markdown formatting
         text = line
+        text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+        text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
+        text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+        text = re.sub(r'`([^`]+)`', r'<font face="Courier">\1</font>', text)
         
-        if line.startswith("# "):
-            font_style = "B"
-            font_size = 14
-            text = line[2:]
-        elif line.startswith("## "):
-            font_style = "B"
-            font_size = 12
-            text = line[3:]
-        elif line.startswith("### "):
-            font_style = "B"
-            font_size = 11
-            text = line[4:]
-        elif line.startswith("- "):
-            text = "• " + line[2:]
-        elif line.startswith("```"):
-            continue  # Skip code fence lines
-        else:
-            # Clean inline markdown from regular text
-            text = re.sub(r"\*\*(.+?)\*\*", r"", line)
-            text = re.sub(r"\*(.+?)\*", r"", text)
-            text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"", text)
-            text = re.sub(r"`([^`]+)`", r"", text)
+        # Escape any remaining special XML chars for reportlab
+        text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        # Unescape the ones we intentionally added for formatting
+        text = text.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
+        text = text.replace('&lt;i&gt;', '<i>').replace('&lt;/i&gt;', '</i>')
+        text = text.replace('&lt;font face="Courier"&gt;', '<font face="Courier">')
+        text = text.replace('&lt;/font&gt;', '</font>')
         
-        # Encode safely
+        # Process based on markdown syntax
         try:
-            text = text.encode("utf-8", "replace").decode("utf-8")
-        except Exception:
-            text = text.encode("ascii", "replace").decode("ascii")
-        
-        # Set font and render
-        pdf.set_font("Helvetica", style=font_style, size=font_size)
-        
-        # Use write instead of multi_cell for more reliable rendering
-        # This handles wrapping automatically without layout exceptions
-        try:
-            pdf.multi_cell(0, 5, text, align="L")
-        except Exception:
-            # Fallback: if multi_cell fails, skip the line rather than showing placeholder
-            pass
+            if line.startswith('# '):
+                story.append(Paragraph(line[2:], title_style))
+            elif line.startswith('## '):
+                story.append(Paragraph(line[3:], heading2_style))
+            elif line.startswith('### '):
+                story.append(Paragraph(line[4:], heading3_style))
+            elif line.startswith('- '):
+                story.append(Paragraph('• ' + line[2:], bullet_style))
+            elif re.match(r'^\d+\.\s', line):
+                story.append(Paragraph(line, bullet_style))
+            elif line.startswith('```'):
+                continue  # Skip code fence lines
+            else:
+                # Regular paragraph
+                if text.strip():
+                    story.append(Paragraph(text, body_style))
+        except Exception as e:
+            # If any line fails, add as plain text with fallback style
+            try:
+                story.append(Paragraph(text, body_style))
+            except Exception:
+                pass  # Skip problematic lines gracefully
     
-    return bytes(pdf.output())
+    # Build PDF
+    try:
+        doc.build(story)
+    except Exception as e:
+        print(f"Warning: PDF build encountered issue: {e}")
+    
+    return pdf_buffer.getvalue()
 
 # Initialize session state variables
 if "messages" not in st.session_state:

@@ -15,5 +15,5 @@ dependencies = [
     "python-dotenv>=1.1.0",
     "streamlit>=1.44.1",
     "markdown2>=2.4.0",
-    "fpdf2>=2.7.0",
+    "reportlab>=4.0.0",
 ]
