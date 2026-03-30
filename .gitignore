@@ -19,3 +19,6 @@ CLAUDE.md
 # Logs
 *.log
 server.log
+
+# Claude Code
+.claude/
