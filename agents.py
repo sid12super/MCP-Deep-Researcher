@@ -27,13 +27,56 @@ CACHE_TTL_SECONDS = 24 * 60 * 60  # 24 hours
 # CACHE HELPER FUNCTIONS
 # ============================================================================
 
-def _make_cache_key(query: str, conversation_context: str) -> str:
+
+# ============================================================================
+# SOURCE CREDIBILITY SCORING
+# ============================================================================
+
+_HIGH_CREDIBILITY_DOMAINS = frozenset({
+    "arxiv.org", "pubmed.ncbi.nlm.nih.gov", "nature.com", "science.org",
+    "sciencedirect.com", "springer.com", "ieee.org", "acm.org",
+    "nih.gov", "who.int", "cdc.gov", "gov.uk", "europa.eu", "un.org",
+    "reuters.com", "apnews.com", "bbc.com", "nytimes.com", "wsj.com",
+    "ft.com", "economist.com", "worldbank.org",
+})
+
+_MEDIUM_CREDIBILITY_DOMAINS = frozenset({
+    "wikipedia.org", "britannica.com", "investopedia.com",
+    "techcrunch.com", "wired.com", "arstechnica.com", "theverge.com",
+    "forbes.com", "businessinsider.com", "cnbc.com", "bloomberg.com",
+    "stackoverflow.com", "github.com", "medium.com",
+    "towardsdatascience.com", "openai.com", "anthropic.com",
+})
+
+
+def score_source(url: str) -> str:
+    """Return 'high', 'medium', or 'unverified' based on URL domain."""
+    try:
+        from urllib.parse import urlparse
+        hostname = urlparse(url).hostname or ""
+        hostname = hostname.removeprefix("www.")
+        if hostname in _HIGH_CREDIBILITY_DOMAINS:
+            return "high"
+        if hostname in _MEDIUM_CREDIBILITY_DOMAINS:
+            return "medium"
+        for domain in _HIGH_CREDIBILITY_DOMAINS:
+            if hostname.endswith("." + domain):
+                return "high"
+        for domain in _MEDIUM_CREDIBILITY_DOMAINS:
+            if hostname.endswith("." + domain):
+                return "medium"
+        return "unverified"
+    except Exception:
+        return "unverified"
+
+def _make_cache_key(query: str, conversation_context: str, search_depth: str = "advanced") -> str:
     """
-    Produce a stable hex digest that uniquely identifies this (query, context) pair.
+    Produce a stable hex digest that uniquely identifies this (query, context, depth) triple.
     conversation_context is included so follow-up questions do not collide
     with the same bare query asked in a fresh session.
+    search_depth is included so "basic" and "advanced" results never share a cache entry.
     """
-    raw = json.dumps({"query": query, "context": conversation_context}, sort_keys=True)
+    raw = json.dumps({"query": query, "context": conversation_context, "search_depth": search_depth}, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -93,13 +136,14 @@ class ResearchState(TypedDict):
     search_results: dict[str, list[dict]] # {question: [{content, url}, ...]}
     final_report: str                     # Final markdown report from synthesizer
     conversation_context: str             # Previous Q&A for multi-turn awareness
+    search_depth: str                     # "basic" or "advanced" (Tavily param)
 
 
 # ============================================================================
 # SYSTEM PROMPTS
 # ============================================================================
 
-PLANNER_SYSTEM_PROMPT = """You are a research planning specialist. Given a broad research query, decompose it into 3 to 5 precise, targeted sub-questions that together provide complete coverage of the topic.
+PLANNER_SYSTEM_PROMPT = """You are a research planning specialist. Given a research query, decompose it into 3 to 5 precise, targeted sub-questions that together provide complete coverage of the topic.
 
 Rules:
 - Each question must be independently searchable (a web search for it should return useful results)
@@ -108,6 +152,10 @@ Rules:
 - Order them from foundational (context/background) to specific (impact/analysis)
 - Do not number them or add prefixes
 - Each question should be 1-2 sentences and end with a question mark
+
+Context Awareness:
+- If prior conversation context is provided (prior research findings): Generate follow-up questions that BUILD ON prior research. Avoid repeating topics already thoroughly covered. Instead, deepen, refine, explore new angles, or investigate relationships to what was already researched.
+- If NO prior context is provided: Generate comprehensive foundational questions covering the full scope of the query.
 
 Return ONLY a JSON object matching the schema provided."""
 
@@ -152,7 +200,10 @@ Rules:
 - Write for a technically sophisticated audience
 - Use present tense for current state, past tense for historical events
 - Keep each Key Finding section to 150-250 words
-- Do NOT make up numbers or statistics that were not in the search results"""
+- Do NOT make up numbers or statistics that were not in the search results
+- Each source includes a credibility tag: "high" (peer-reviewed/government/major outlet),
+  "medium" (established tech/business/reference), or "unverified".
+  Weight "high" sources more heavily when findings conflict across sources."""
 
 
 # ============================================================================
@@ -169,9 +220,14 @@ def planner_node(state: ResearchState) -> dict:
     llm = ChatOpenAI(model="gpt-4o", temperature=0, api_key=os.getenv("OPENAI_API_KEY"))
     structured_llm = llm.with_structured_output(ResearchPlan)
 
+    user_content = f"Query: {state['query']}"
+
+    if state.get("conversation_context"):
+        user_content += f"\n\nPrior Research Context:\n{state['conversation_context']}"
+
     messages = [
         SystemMessage(content=PLANNER_SYSTEM_PROMPT),
-        HumanMessage(content=f"Query: {state['query']}")
+        HumanMessage(content=user_content)
     ]
 
     result: ResearchPlan = structured_llm.invoke(messages)
@@ -202,11 +258,15 @@ def searcher_node(state: ResearchState) -> dict:
             response = tavily.search(
                 query=question,
                 max_results=5,
-                search_depth="advanced",
+                search_depth=state.get("search_depth", "advanced"),
                 include_raw_content=False
             )
             results = [
-                {"content": r["content"], "url": r["url"]}
+                {
+                    "content": r["content"],
+                    "url": r["url"],
+                    "credibility": score_source(r["url"]),
+                }
                 for r in response.get("results", [])
             ]
             print(f"[SEARCHER] Got {len(results)} results for: {question[:60]}...")
@@ -242,7 +302,8 @@ def synthesizer_node(state: ResearchState) -> dict:
             block += "No results found for this question.\n"
         else:
             for i, r in enumerate(results, 1):
-                block += f"Source {i} [{r['url']}]:\n{r['content']}\n\n"
+                credibility = r.get("credibility", "unverified")
+                block += f"Source {i} [{r['url']}] [credibility: {credibility}]:\n{r['content']}\n\n"
         evidence_blocks.append(block)
 
     evidence_text = "\n".join(evidence_blocks)
@@ -302,7 +363,12 @@ research_graph = build_research_graph()
 # PUBLIC API
 # ============================================================================
 
-def run_research(query: str, conversation_context: str = "") -> str:
+def run_research(
+    query: str,
+    conversation_context: str = "",
+    search_depth: str = "advanced",
+    return_full_state: bool = False,
+) -> str | dict:
     """
     Public API for the research pipeline.
     Invoked by server.py (MCP) and app.py (Streamlit).
@@ -312,9 +378,15 @@ def run_research(query: str, conversation_context: str = "") -> str:
         conversation_context: Optional previous Q&A for multi-turn awareness.
             Included in the cache key so follow-up queries do not collide
             with the same bare query asked in a fresh session.
+        search_depth: "basic" or "advanced". Forwarded to Tavily. Defaults to
+            "advanced". Included in the cache key to prevent cross-depth collisions.
+        return_full_state: If True, returns a dict with report, query, and research_questions.
+            If False (default), returns only the markdown report string (MCP-compatible).
 
     Returns:
-        A markdown-formatted research report.
+        When return_full_state is False (default): a markdown-formatted research report string.
+        When return_full_state is True: a dict with keys "report" (str), "query" (str),
+        and "research_questions" (list[str]).
     """
     print(f"\n{'='*60}")
     print(f"[RUN_RESEARCH] Starting research for: {query}")
@@ -323,10 +395,12 @@ def run_research(query: str, conversation_context: str = "") -> str:
     print(f"{'='*60}")
 
     # --- CACHE CHECK ---
-    cache_key = _make_cache_key(query, conversation_context)
+    cache_key = _make_cache_key(query, conversation_context, search_depth)
     cached_report = _load_cache(cache_key)
     if cached_report is not None:
         print(f"[CACHE] Hit for query: {query[:60]}...")
+        if return_full_state:
+            return {"report": cached_report, "query": query, "research_questions": []}
         return cached_report
     print("[CACHE] Miss — running full pipeline")
     # --- END CACHE CHECK ---
@@ -337,7 +411,8 @@ def run_research(query: str, conversation_context: str = "") -> str:
             "research_questions": [],
             "search_results": {},
             "final_report": "",
-            "conversation_context": conversation_context
+            "conversation_context": conversation_context,
+            "search_depth": search_depth
         }
 
         final_state = research_graph.invoke(initial_state)
@@ -348,6 +423,12 @@ def run_research(query: str, conversation_context: str = "") -> str:
         print(f"[CACHE] Saved result for query: {query[:60]}...")
         # --- END CACHE WRITE ---
 
+        if return_full_state:
+            return {
+                "report": report,
+                "query": query,
+                "research_questions": final_state["research_questions"],
+            }
         return report
 
     except Exception as e:
@@ -356,3 +437,74 @@ def run_research(query: str, conversation_context: str = "") -> str:
         import traceback
         traceback.print_exc()
         return f"## Research Error\n\nAn error occurred during research:\n\n```\n{error_msg}\n```"
+
+
+# ============================================================================
+# STREAMING API (FOR STREAMLIT REAL-TIME PROGRESS)
+# ============================================================================
+
+def stream_research(
+    query: str,
+    conversation_context: str = "",
+    search_depth: str = "advanced",
+):
+    """
+    Generator for Streamlit real-time progress. Yields (event_type, data) tuples:
+        ("cache_hit",  {"report": str})
+        ("node_done",  {"node": str, "label": str, "state": dict})
+        ("complete",   {"report": str, "research_questions": list[str]})
+        ("error",      {"message": str})
+    Cache logic mirrors run_research; result is cached after synthesizer completes.
+    """
+    _NODE_LABELS = {
+        "planner":     "Planning research questions",
+        "searcher":    "Searching the web",
+        "synthesizer": "Synthesizing report",
+    }
+
+    print(f"\n[STREAM_RESEARCH] Starting: {query}")
+    cache_key = _make_cache_key(query, conversation_context, search_depth)
+    cached_report = _load_cache(cache_key)
+    if cached_report is not None:
+        print(f"[CACHE] Hit (stream) for: {query[:60]}...")
+        yield ("cache_hit", {"report": cached_report})
+        return
+
+    print("[CACHE] Miss (stream) — running full pipeline")
+    try:
+        initial_state: ResearchState = {
+            "query": query,
+            "research_questions": [],
+            "search_results": {},
+            "final_report": "",
+            "conversation_context": conversation_context,
+            "search_depth": search_depth,
+        }
+
+        final_report = ""
+        final_questions = []
+
+        for chunk in research_graph.stream(initial_state):
+            for node_name, node_output in chunk.items():
+                yield ("node_done", {
+                    "node": node_name,
+                    "label": _NODE_LABELS.get(node_name, node_name),
+                    "state": node_output,
+                })
+                if node_name == "planner":
+                    final_questions = node_output.get("research_questions", [])
+                if node_name == "synthesizer":
+                    final_report = node_output.get("final_report", "")
+
+        if final_report:
+            _save_cache(cache_key, final_report)
+            print(f"[CACHE] Saved (stream) for: {query[:60]}...")
+
+        yield ("complete", {"report": final_report, "research_questions": final_questions})
+
+    except Exception as e:
+        error_msg = f"Research pipeline error: {str(e)}"
+        print(f"[STREAM_RESEARCH] ERROR: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        yield ("error", {"message": error_msg})
