@@ -1,0 +1,17 @@
+[project]
+name = "agentic_deep_researcher"
+version = "0.2.0"
+description = "Deep Research Agent using LangGraph, OpenAI GPT-4o, and Tavily"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph>=0.2.0",
+    "langchain>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langchain-core>=0.3.0",
+    "tavily-python>=0.3.3",
+    "mcp>=1.6.0",
+    "openai>=1.3.0,<2.0",
+    "python-dotenv>=1.1.0",
+    "streamlit>=1.44.1",
+]
