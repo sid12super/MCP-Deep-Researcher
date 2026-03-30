@@ -62,6 +62,44 @@ OPENAI_API_KEY=sk-your-key-here
 TAVILY_API_KEY=tvly-your-key-here
 ```
 
+## Features
+
+### Phase 1: Search Depth Control
+- Toggle between "basic" (faster) and "advanced" (comprehensive) search modes
+- Adjustable via sidebar selectbox
+- Different search depths get separate cache entries
+
+### Phase 2: Multi-turn Conversation
+- Build on previous queries with full conversation context
+- "New Research Topic" button to reset and start fresh
+- Previous research findings automatically used to avoid duplicating work
+
+### Phase 3: Export in Multiple Formats
+- **HTML** — Styled web-ready reports with proper formatting
+- **PDF** — Professional documents ready for sharing/printing
+- **JSON** — Structured data for programmatic access
+- Exports include **full conversation history** (all queries and reports)
+
+### Phase 4: Source Credibility Scoring
+- Automatic classification of sources: **high** (peer-reviewed/government), **medium** (established tech/business), **unverified**
+- Synthesizer weights high-credibility sources more heavily when findings conflict
+- Transparent credibility tags visible in reports
+
+### Phase 5: Real-time Progress Updates
+- Visual status block showing live progress through each pipeline stage
+- Per-stage metrics: questions generated, search results retrieved
+- Instant cache hits show "Loaded from cache" without re-running pipeline
+
+## Live Deployment
+
+**Try it now**: https://sid12super-mcp-deep-researcher.streamlit.app/
+
+Deployed on Streamlit Cloud with:
+- Zero cold-start fees
+- Automatic dependency management
+- API key secrets securely stored
+- Instant git-based updates
+
 ## Usage
 
 ### Option 1: Streamlit Web UI (Recommended for Users)
@@ -76,6 +114,7 @@ Opens interactive chat at `http://localhost:8501`:
 - Get comprehensive markdown reports with sources
 - Build on previous queries with conversation context
 
+- Export full conversation in HTML/PDF/JSON formats
 ### Option 2: Direct Python API
 
 ```bash

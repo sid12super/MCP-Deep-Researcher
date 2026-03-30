@@ -212,13 +212,22 @@ with st.sidebar:
             base_name = f"research_{safe_q}_{ts}"
             response = st.session_state.last_result["report"]
 
+            # Build full conversation for export
+            full_conversation_md = "# Full Research Conversation\n\n"
+            full_conversation_md += f"**Exported:** {ts}\n\n"
+            for i, msg in enumerate(st.session_state.messages, 1):
+                if msg["role"] == "user":
+                    full_conversation_md += f"## Query {i}\n{msg['content']}\n\n"
+                else:
+                    full_conversation_md += f"## Research Report {i}\n{msg['content']}\n\n---\n\n"
+            
             if export_format == "HTML":
-                html_body = markdown2.markdown(response, extras=["tables", "fenced-code-blocks"])
+                html_body = markdown2.markdown(full_conversation_md, extras=["tables", "fenced-code-blocks"])
                 html_full = f"<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>{html_body}</body></html>"
                 st.download_button(
                     label="⬇ Download as HTML",
                     data=html_full,
-                    file_name=f"{base_name}.html",
+                    file_name=f"research_conversation_{ts}.html",
                     mime="text/html",
                     key=f"html_export_{ts}",
                     use_container_width=True,
@@ -226,23 +235,22 @@ with st.sidebar:
             elif export_format == "PDF":
                 st.download_button(
                     label="⬇ Download as PDF",
-                    data=_markdown_to_pdf_bytes(response),
-                    file_name=f"{base_name}.pdf",
+                    data=_markdown_to_pdf_bytes(full_conversation_md),
+                    file_name=f"research_conversation_{ts}.pdf",
                     mime="application/pdf",
                     key=f"pdf_export_{ts}",
                     use_container_width=True,
                 )
             elif export_format == "JSON":
                 export_data = {
-                    "query": st.session_state.last_query,
-                    "timestamp": ts,
-                    "research_questions": st.session_state.last_result.get("research_questions", []),
-                    "report": response,
+                    "exported_at": ts,
+                    "total_queries": len([m for m in st.session_state.messages if m["role"] == "user"]),
+                    "conversation": st.session_state.messages,
                 }
                 st.download_button(
                     label="⬇ Download as JSON",
                     data=json.dumps(export_data, ensure_ascii=False, indent=2),
-                    file_name=f"{base_name}.json",
+                    file_name=f"research_conversation_{ts}.json",
                     mime="application/json",
                     key=f"json_export_{ts}",
                     use_container_width=True,
