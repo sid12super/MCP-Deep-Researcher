@@ -24,6 +24,8 @@ def _markdown_to_pdf_bytes(report: str) -> bytes:
     Handles: H1 (#), H2 (##), H3 (###), bold (**text**), lists, and plain text.
     Returns raw PDF bytes suitable for st.download_button.
     """
+    from fpdf.errors import FPDFException
+    
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
@@ -34,7 +36,40 @@ def _markdown_to_pdf_bytes(report: str) -> bytes:
         try:
             return text.encode("latin-1", "replace").decode("latin-1")
         except Exception:
-            return text.encode("utf-8", "replace").decode("utf-8", "replace")
+            return text
+
+    def wrap_long_text(text: str, max_length: int = 100) -> str:
+        """Insert breaks in very long words to prevent layout issues."""
+        words = text.split()
+        result = []
+        for word in words:
+            if len(word) > max_length:
+                # Break long words every max_length chars
+                for i in range(0, len(word), max_length):
+                    result.append(word[i:i+max_length])
+            else:
+                result.append(word)
+        return " ".join(result)
+
+    def safe_multi_cell(pdf_obj, width, height, text):
+        """Safely add multi_cell, handling layout exceptions."""
+        try:
+            pdf_obj.multi_cell(width, height, text)
+        except FPDFException:
+            # If text doesn't fit, try wrapping long words and retry
+            try:
+                wrapped = wrap_long_text(text, 80)
+                pdf_obj.multi_cell(width, height, wrapped)
+            except FPDFException:
+                # If still doesn't fit, use smaller font or skip
+                try:
+                    pdf_obj.set_font("Helvetica", size=8)
+                    pdf_obj.multi_cell(width, height, wrapped)
+                except FPDFException:
+                    # Last resort: add a placeholder line
+                    pdf_obj.set_font("Helvetica", size=10)
+                    pdf_obj.cell(0, 6, "[Content too long to render]")
+                    pdf_obj.ln()
 
     for raw_line in report.splitlines():
         line = raw_line.rstrip()
@@ -47,22 +82,22 @@ def _markdown_to_pdf_bytes(report: str) -> bytes:
         # Process headers
         if line.startswith("# "):
             pdf.set_font("Helvetica", style="B", size=16)
-            pdf.multi_cell(0, 10, safe_encode(line[2:]))
+            safe_multi_cell(pdf, 0, 10, safe_encode(line[2:]))
         elif line.startswith("## "):
             pdf.set_font("Helvetica", style="B", size=14)
-            pdf.multi_cell(0, 8, safe_encode(line[3:]))
+            safe_multi_cell(pdf, 0, 8, safe_encode(line[3:]))
         elif line.startswith("### "):
             pdf.set_font("Helvetica", style="B", size=12)
-            pdf.multi_cell(0, 7, safe_encode(line[4:]))
+            safe_multi_cell(pdf, 0, 7, safe_encode(line[4:]))
         # Process bullet points and numbered lists
         elif line.startswith("- "):
             pdf.set_font("Helvetica", size=10)
             # Add bullet point indentation
-            pdf.multi_cell(0, 6, "• " + safe_encode(line[2:]))
+            safe_multi_cell(pdf, 0, 6, "• " + safe_encode(line[2:]))
         elif re.match(r"^\d+\.\s", line):
             pdf.set_font("Helvetica", size=10)
             # Keep numbered format
-            pdf.multi_cell(0, 6, safe_encode(line))
+            safe_multi_cell(pdf, 0, 6, safe_encode(line))
         # Process code blocks
         elif line.startswith("```"):
             pdf.set_font("Courier", size=9)
@@ -70,15 +105,14 @@ def _markdown_to_pdf_bytes(report: str) -> bytes:
         # Regular text
         else:
             # Clean markdown formatting but preserve content
-            clean = re.sub(r"\*\*(.+?)\*\*", r"\1", line)  # Remove bold markers
-            clean = re.sub(r"\*(.+?)\*", r"\1", clean)      # Remove italic markers
-            clean = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", clean)  # Remove links but keep text
-            clean = re.sub(r"`([^`]+)`", r"\1", clean)      # Remove inline code markers
+            clean = re.sub(r"\*\*(.+?)\*\*", r"", line)  # Remove bold markers
+            clean = re.sub(r"\*(.+?)\*", r"", clean)      # Remove italic markers
+            clean = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"", clean)  # Remove links but keep text
+            clean = re.sub(r"`([^`]+)`", r"", clean)      # Remove inline code markers
             pdf.set_font("Helvetica", size=10)
-            pdf.multi_cell(0, 6, safe_encode(clean))
+            safe_multi_cell(pdf, 0, 6, safe_encode(clean))
 
     return bytes(pdf.output())
-
 
 # Initialize session state variables
 if "messages" not in st.session_state:
