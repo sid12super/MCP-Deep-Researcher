@@ -149,16 +149,22 @@ Edit the `SYNTHESIZER_SYSTEM_PROMPT` in `agents.py:56` to customize the markdown
 ├── app.py             # Streamlit UI
 ├── pyproject.toml     # Dependencies via UV
 ├── .env.example       # API key template
-└── test_*.py          # Integration tests
+└── test/              # Test suite & verification scripts
 ```
 
 ### Running Tests
 ```bash
+# Quick environment verification
+bash test/verify_setup.sh
+
 # Test imports and environment setup
-uv run test_imports_only.py
+uv run test/test_imports_only.py
 
 # Verify LangChain & Tavily integration
-uv run test_langchain.py
+uv run test/test_langchain.py
+
+# Run full pipeline integration tests
+uv run test/test_crew.py
 ```
 
 ### Environment Variables
@@ -186,22 +192,3 @@ Costs:
 - OpenAI GPT-4o: ~$0.01-0.05 per query
 - Tavily: ~$0.01 per search (advanced mode)
 
-## License
-
-MIT - See LICENSE file for details
-
-## Contributing
-
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## Support
-
-For issues, questions, or suggestions:
-- Open a GitHub issue
-- Check existing documentation in `CLAUDE.md` for architecture details
-- Review `agents.py` comments for implementation details
