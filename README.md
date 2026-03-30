@@ -42,8 +42,8 @@ You'll need API keys for:
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/YOUR_USERNAME/agentic-deep-researcher.git
-cd agentic-deep-researcher
+git clone https://github.com/sid12super/MCP-Deep-Researcher.git
+cd MCP-Deep-Researcher
 ```
 
 2. Install dependencies using UV:
@@ -184,11 +184,14 @@ uv run test/test_crew.py
 ## Performance Notes
 
 - **Planning**: ~2-3 seconds (GPT-4o structured output)
-- **Searching**: ~5-10 seconds (5 Tavily searches × 2 results each)
+- **Searching**: ~2-3 seconds (parallel Tavily searches, 3-4x faster)
 - **Synthesizing**: ~5-8 seconds (GPT-4o markdown generation)
-- **Total**: ~15-25 seconds per query
+- **Total**: ~9-14 seconds per query (30-40% faster with parallelization)
+
+**Cached queries**: <100ms (instant retrieval from cache)
 
 Costs:
-- OpenAI GPT-4o: ~$0.01-0.05 per query
-- Tavily: ~$0.01 per search (advanced mode)
+- OpenAI GPT-4o: ~$0.01-0.05 per query (1st run only)
+- Tavily: ~$0.01 per search (advanced mode, 1st run only)
+- **Repeat queries within 24h**: Free (cached results)
 
