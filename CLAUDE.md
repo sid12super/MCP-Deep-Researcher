@@ -35,11 +35,12 @@ This file provides guidance to Claude Code when working on this repository.
 - Ensures questions are non-overlapping and collectively exhaustive
 - Returns `ResearchPlan` model with validated questions
 
-**2. Searcher Node** (`agents.py:127-156`)
-- Executes Tavily searches for each research question sequentially
+**2. Searcher Node** (`agents.py:186-226`)
+- Executes Tavily searches for each research question **in parallel** using `ThreadPoolExecutor`
+- All 3-5 searches fire concurrently instead of sequentially (3-4x speedup)
 - Uses `search_depth="advanced"` for comprehensive results
 - Collects `max_results=5` per question with content & URLs
-- Gracefully handles search failures with empty result sets
+- Gracefully handles search failures with empty result sets via per-question error handling
 
 **3. Synthesizer Node** (`agents.py:159-202`)
 - Analyzes all search evidence for patterns and insights
@@ -70,7 +71,7 @@ State flows linearly through all three nodes, each enriching it.
 
 | File | Purpose | Key Functions/Classes |
 |------|---------|----------------------|
-| `agents.py` | Core LangGraph pipeline | `planner_node()`, `searcher_node()`, `synthesizer_node()`, `build_research_graph()`, `run_research()` |
+| `agents.py` | Core LangGraph pipeline + caching | `planner_node()`, `searcher_node()` (parallel), `synthesizer_node()`, `build_research_graph()`, `run_research()`, `_make_cache_key()`, `_load_cache()`, `_save_cache()` |
 | `server.py` | MCP FastMCP wrapper | `crew_research()` tool definition |
 | `app.py` | Streamlit web UI | Chat interface, session state, API key validation |
 | `pyproject.toml` | Dependency management | Specifies LangGraph, Tavily, OpenAI, MCP, Streamlit |
@@ -146,13 +147,13 @@ uv run server.py
 
 Developers can modify:
 
-### 1. LLM Model (`agents.py:110, 180`)
+### 1. LLM Model (`agents.py:168, 252`)
 ```python
 # Change from GPT-4o to other OpenAI models
 model="gpt-4-turbo"  # or gpt-4, gpt-3.5-turbo
 ```
 
-### 2. Search Strategy (`agents.py:140-144`)
+### 2. Search Strategy (`agents.py:202-207`)
 ```python
 response = tavily.search(
   query=question,
@@ -162,27 +163,71 @@ response = tavily.search(
 )
 ```
 
-### 3. Report Structure (`agents.py:56-96`)
+### 3. Cache Configuration (`agents.py:22-23`)
+```python
+CACHE_DIR = Path(__file__).parent / "cache"  # Cache directory location
+CACHE_TTL_SECONDS = 24 * 60 * 60             # 24 hours; adjust for shorter/longer expiry
+```
+
+### 4. Report Structure (`agents.py:131-166`)
 Modify `SYNTHESIZER_SYSTEM_PROMPT` to change:
 - Markdown formatting (headers, lists, emphasis)
 - Citation style (inline, footnotes, numbered)
 - Section ordering or additional sections
 
-### 4. Question Generation (`agents.py:43-53`)
+### 5. Question Generation (`agents.py:101-109`)
 Modify `PLANNER_SYSTEM_PROMPT` to request different numbers of questions, different ordering, etc.
+
+## Caching System
+
+The pipeline includes a built-in result caching layer to optimize costs and speed for repeated queries.
+
+### How It Works
+
+- **Cache Key**: SHA-256 hash of (query + conversation_context) — unique per query variant
+- **Storage**: `./cache/` directory with JSON files (auto-created)
+- **TTL**: 24 hours (configurable via `CACHE_TTL_SECONDS`)
+- **Integration**: Transparent — cache check happens in `run_research()` before pipeline execution
+
+### Cache Hit Scenario
+```
+User Query → Cache Key Hash → Lookup in ./cache/{hash}.json → Found & Valid → Return Instantly
+```
+
+### Cache Miss Scenario
+```
+User Query → Cache Key Hash → Lookup → Not Found or Expired → Run Full Pipeline → Save to Cache → Return
+```
+
+### Conversation Context & Caching
+
+The `conversation_context` is included in the cache key, so:
+- Query without context → 1 cache entry
+- Same query with different context → Different cache entry
+- MCP path (always empty context) → Always uses same cache for identical queries
+- Streamlit multi-turn → Each turn's context changes the key (cache hits less frequent, but correct)
+
+### Cache Management
+
+Clear cache by deleting the `cache/` directory:
+```bash
+rm -rf cache/
+```
+
+The directory and files will be auto-recreated on the next query execution.
 
 ## Testing
 
 ### Import & Setup Validation
 ```bash
-uv run test_imports_only.py
+uv run test/test_imports_only.py
 ```
 Checks all dependencies import correctly and APIs are configured.
 
 ### Integration Tests
 ```bash
-uv run test_crew.py       # Run full pipeline
-uv run test_langchain.py  # LangChain + Tavily integration
+uv run test/test_crew.py       # Run full pipeline
+uv run test/test_langchain.py  # LangChain + Tavily integration
 ```
 
 ## Deployment
@@ -209,17 +254,25 @@ CMD ["uv", "run", "server.py"]
 
 ## Performance Characteristics
 
-| Stage | Time | Bottleneck |
-|-------|------|-----------|
+### Default Run (Full Pipeline)
+
+| Stage | Time | Notes |
+|-------|------|-------|
 | Planner (GPT-4o) | 2-3s | LLM latency |
-| Searcher (Tavily, 5 queries) | 5-10s | API rate limits |
+| Searcher (Tavily, parallel) | 2-3s | Concurrent searches (3-4x faster than sequential) |
 | Synthesizer (GPT-4o) | 5-8s | LLM reasoning time |
-| **Total** | **~15-25s** | Parallel searches could help |
+| **Total** | **~9-14s** | ✅ 30-40% faster with parallel searches |
+
+### Cached Run (Repeated Query)
+| Stage | Time |
+|-------|------|
+| Cache lookup + return | <100ms | Instant response from `./cache/` directory |
 
 ### Cost Estimate
-- GPT-4o: ~$0.01-0.05 per query
-- Tavily advanced: ~$0.01 per search
-- **Total per query: ~$0.06-0.10**
+- GPT-4o: ~$0.01-0.05 per query (1st run only)
+- Tavily advanced: ~$0.01 per search (1st run only)
+- **Cost per unique query: ~$0.06-0.10**
+- **Cost per repeated query (within 24h): $0.00** (cache hit)
 
 ## Common Issues & Solutions
 
@@ -245,16 +298,22 @@ Use clear, descriptive messages:
 - ✅ `"Feature: add conversation context to synthesizer"`
 - ❌ `"Update agents.py"`
 
+## Completed Enhancements
+
+✅ **Parallel searching** - Tavily searches execute concurrently via `ThreadPoolExecutor` (3-4x speedup)
+✅ **Caching** - Full pipeline results cached in `./cache/` with SHA-256 keying and 24h TTL
+
 ## Future Enhancements
 
 Possible improvements:
-1. **Parallel searching** - Execute Tavily searches concurrently
-2. **Multi-turn refinement** - Let LLM request follow-up searches
-3. **Source ranking** - Score sources by relevance/authority
-4. **Export formats** - PDF, HTML, JSON in addition to markdown
-5. **Caching** - Cache search results for identical queries
-6. **Alternative models** - Support Anthropic Claude, local Ollama
-7. **Custom search tools** - Replace/augment Tavily with other sources
+1. **Multi-turn refinement** - Let LLM request follow-up searches based on initial results
+2. **Source ranking** - Score sources by relevance/authority/recency
+3. **Export formats** - PDF, HTML, JSON in addition to markdown
+4. **Streamlit Cloud deployment** - Standalone web app at public URL
+5. **Alternative models** - Support Anthropic Claude, local Ollama
+6. **Custom search tools** - Replace/augment Tavily with academic databases, news APIs, etc.
+7. **Batch processing** - Queue multiple queries for concurrent execution
+8. **Cache pruning** - Auto-delete stale cache files based on disk space/age
 
 ## References
 

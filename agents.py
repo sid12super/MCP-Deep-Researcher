@@ -1,4 +1,9 @@
 import os
+import hashlib
+import json
+import time
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TypedDict
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -9,6 +14,60 @@ from tavily import TavilyClient
 
 # Load environment variables
 load_dotenv()
+
+# ============================================================================
+# CACHE CONFIGURATION
+# ============================================================================
+
+CACHE_DIR = Path(__file__).parent / "cache"
+CACHE_TTL_SECONDS = 24 * 60 * 60  # 24 hours
+
+
+# ============================================================================
+# CACHE HELPER FUNCTIONS
+# ============================================================================
+
+def _make_cache_key(query: str, conversation_context: str) -> str:
+    """
+    Produce a stable hex digest that uniquely identifies this (query, context) pair.
+    conversation_context is included so follow-up questions do not collide
+    with the same bare query asked in a fresh session.
+    """
+    raw = json.dumps({"query": query, "context": conversation_context}, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _load_cache(key: str) -> str | None:
+    """
+    Return cached report string if it exists and is within TTL, else None.
+    Never raises — any I/O failure is treated as a cache miss.
+    """
+    cache_file = CACHE_DIR / f"{key}.json"
+    try:
+        if not cache_file.exists():
+            return None
+        payload = json.loads(cache_file.read_text(encoding="utf-8"))
+        if time.time() - payload["timestamp"] > CACHE_TTL_SECONDS:
+            return None  # expired; leave stale file, will be overwritten on next write
+        return payload["report"]
+    except Exception:
+        return None  # corrupted file, permission error, etc.
+
+
+def _save_cache(key: str, report: str) -> None:
+    """
+    Persist report to cache directory.
+    Auto-creates the cache directory if absent.
+    Never raises — cache write failure must not break the pipeline.
+    """
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {"timestamp": time.time(), "report": report}
+        cache_file = CACHE_DIR / f"{key}.json"
+        cache_file.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        print(f"[CACHE] Warning: could not write cache file: {e}")
+
 
 # ============================================================================
 # PYDANTIC MODELS
@@ -126,32 +185,43 @@ def planner_node(state: ResearchState) -> dict:
 
 def searcher_node(state: ResearchState) -> dict:
     """
-    Execute Tavily searches for each research question sequentially.
-    Collects results with content and URLs for the synthesizer.
+    Execute Tavily searches for each research question in parallel using a thread pool.
+    Uses ThreadPoolExecutor because TavilyClient is synchronous (no async variant).
+    Preserves per-question error handling: failed searches return an empty list.
     """
-    print("\n[SEARCHER] Starting web searches...")
+    print("\n[SEARCHER] Starting parallel web searches...")
 
     tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
-    search_results = {}
+    questions = state["research_questions"]
+    search_results: dict[str, list[dict]] = {}
 
-    for question in state["research_questions"]:
-        print(f"\n[SEARCHER] Searching: {question}")
+    def _search_one(question: str) -> tuple[str, list[dict]]:
+        """Run a single Tavily search and return (question, results)."""
+        print(f"[SEARCHER] Searching: {question}")
         try:
             response = tavily.search(
                 query=question,
                 max_results=5,
-                search_depth="advanced",  # "basic" for speed, "advanced" for quality
-                include_raw_content=False  # Raw content bloats context window
+                search_depth="advanced",
+                include_raw_content=False
             )
             results = [
                 {"content": r["content"], "url": r["url"]}
                 for r in response.get("results", [])
             ]
-            search_results[question] = results
             print(f"[SEARCHER] Got {len(results)} results for: {question[:60]}...")
+            return question, results
         except Exception as e:
             print(f"[SEARCHER] Error on '{question}': {e}")
-            search_results[question] = []
+            return question, []
+
+    # max_workers=len(questions) is safe: questions are 3-5 per ResearchPlan constraints.
+    # Each thread makes one blocking HTTP call; there is no CPU contention.
+    with ThreadPoolExecutor(max_workers=len(questions)) as executor:
+        futures = {executor.submit(_search_one, q): q for q in questions}
+        for future in as_completed(futures):
+            question, results = future.result()
+            search_results[question] = results
 
     return {"search_results": search_results}
 
@@ -240,6 +310,8 @@ def run_research(query: str, conversation_context: str = "") -> str:
     Args:
         query: The research query or question.
         conversation_context: Optional previous Q&A for multi-turn awareness.
+            Included in the cache key so follow-up queries do not collide
+            with the same bare query asked in a fresh session.
 
     Returns:
         A markdown-formatted research report.
@@ -249,6 +321,15 @@ def run_research(query: str, conversation_context: str = "") -> str:
     if conversation_context:
         print(f"[RUN_RESEARCH] Using conversation context ({len(conversation_context)} chars)")
     print(f"{'='*60}")
+
+    # --- CACHE CHECK ---
+    cache_key = _make_cache_key(query, conversation_context)
+    cached_report = _load_cache(cache_key)
+    if cached_report is not None:
+        print(f"[CACHE] Hit for query: {query[:60]}...")
+        return cached_report
+    print("[CACHE] Miss — running full pipeline")
+    # --- END CACHE CHECK ---
 
     try:
         initial_state: ResearchState = {
@@ -260,7 +341,14 @@ def run_research(query: str, conversation_context: str = "") -> str:
         }
 
         final_state = research_graph.invoke(initial_state)
-        return final_state["final_report"]
+        report = final_state["final_report"]
+
+        # --- CACHE WRITE ---
+        _save_cache(cache_key, report)
+        print(f"[CACHE] Saved result for query: {query[:60]}...")
+        # --- END CACHE WRITE ---
+
+        return report
 
     except Exception as e:
         error_msg = f"Research pipeline error: {str(e)}"
