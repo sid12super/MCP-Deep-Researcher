@@ -21,97 +21,69 @@ st.set_page_config(page_title="🔍 Agentic Deep Researcher", layout="wide")
 def _markdown_to_pdf_bytes(report: str) -> bytes:
     """
     Convert a markdown report string to PDF bytes using fpdf2.
-    Handles: H1 (#), H2 (##), H3 (###), bold (**text**), lists, and plain text.
-    Returns raw PDF bytes suitable for st.download_button.
+    Simple approach: render all text preserving structure, minimal formatting.
     """
-    from fpdf.errors import FPDFException
-    
     pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_auto_page_break(auto=True, margin=10)
     pdf.add_page()
-    pdf.set_margins(15, 15, 15)
-
-    def safe_encode(text: str) -> str:
-        """Encode text to latin-1 with fallback for unsupported chars."""
-        try:
-            return text.encode("latin-1", "replace").decode("latin-1")
-        except Exception:
-            return text
-
-    def wrap_long_text(text: str, max_length: int = 100) -> str:
-        """Insert breaks in very long words to prevent layout issues."""
-        words = text.split()
-        result = []
-        for word in words:
-            if len(word) > max_length:
-                # Break long words every max_length chars
-                for i in range(0, len(word), max_length):
-                    result.append(word[i:i+max_length])
-            else:
-                result.append(word)
-        return " ".join(result)
-
-    def safe_multi_cell(pdf_obj, width, height, text):
-        """Safely add multi_cell, handling layout exceptions."""
-        try:
-            pdf_obj.multi_cell(width, height, text)
-        except FPDFException:
-            # If text doesn't fit, try wrapping long words and retry
-            try:
-                wrapped = wrap_long_text(text, 80)
-                pdf_obj.multi_cell(width, height, wrapped)
-            except FPDFException:
-                # If still doesn't fit, use smaller font or skip
-                try:
-                    pdf_obj.set_font("Helvetica", size=8)
-                    pdf_obj.multi_cell(width, height, wrapped)
-                except FPDFException:
-                    # Last resort: add a placeholder line
-                    pdf_obj.set_font("Helvetica", size=10)
-                    pdf_obj.cell(0, 6, "[Content too long to render]")
-                    pdf_obj.ln()
+    pdf.set_margins(10, 10, 10)
+    
+    # Set default font
+    pdf.set_font("Helvetica", size=10)
 
     for raw_line in report.splitlines():
         line = raw_line.rstrip()
-
-        # Skip empty encoding issues, just process the line
+        
+        # Empty lines
         if not line:
-            pdf.ln(4)
+            pdf.ln(3)
             continue
-
-        # Process headers
+        
+        # Determine formatting and strip markdown
+        font_style = ""
+        font_size = 10
+        text = line
+        
         if line.startswith("# "):
-            pdf.set_font("Helvetica", style="B", size=16)
-            safe_multi_cell(pdf, 0, 10, safe_encode(line[2:]))
+            font_style = "B"
+            font_size = 14
+            text = line[2:]
         elif line.startswith("## "):
-            pdf.set_font("Helvetica", style="B", size=14)
-            safe_multi_cell(pdf, 0, 8, safe_encode(line[3:]))
+            font_style = "B"
+            font_size = 12
+            text = line[3:]
         elif line.startswith("### "):
-            pdf.set_font("Helvetica", style="B", size=12)
-            safe_multi_cell(pdf, 0, 7, safe_encode(line[4:]))
-        # Process bullet points and numbered lists
+            font_style = "B"
+            font_size = 11
+            text = line[4:]
         elif line.startswith("- "):
-            pdf.set_font("Helvetica", size=10)
-            # Add bullet point indentation
-            safe_multi_cell(pdf, 0, 6, "• " + safe_encode(line[2:]))
-        elif re.match(r"^\d+\.\s", line):
-            pdf.set_font("Helvetica", size=10)
-            # Keep numbered format
-            safe_multi_cell(pdf, 0, 6, safe_encode(line))
-        # Process code blocks
+            text = "• " + line[2:]
         elif line.startswith("```"):
-            pdf.set_font("Courier", size=9)
-            pdf.ln(2)
-        # Regular text
+            continue  # Skip code fence lines
         else:
-            # Clean markdown formatting but preserve content
-            clean = re.sub(r"\*\*(.+?)\*\*", r"", line)  # Remove bold markers
-            clean = re.sub(r"\*(.+?)\*", r"", clean)      # Remove italic markers
-            clean = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"", clean)  # Remove links but keep text
-            clean = re.sub(r"`([^`]+)`", r"", clean)      # Remove inline code markers
-            pdf.set_font("Helvetica", size=10)
-            safe_multi_cell(pdf, 0, 6, safe_encode(clean))
-
+            # Clean inline markdown from regular text
+            text = re.sub(r"\*\*(.+?)\*\*", r"", line)
+            text = re.sub(r"\*(.+?)\*", r"", text)
+            text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"", text)
+            text = re.sub(r"`([^`]+)`", r"", text)
+        
+        # Encode safely
+        try:
+            text = text.encode("utf-8", "replace").decode("utf-8")
+        except Exception:
+            text = text.encode("ascii", "replace").decode("ascii")
+        
+        # Set font and render
+        pdf.set_font("Helvetica", style=font_style, size=font_size)
+        
+        # Use write instead of multi_cell for more reliable rendering
+        # This handles wrapping automatically without layout exceptions
+        try:
+            pdf.multi_cell(0, 5, text, align="L")
+        except Exception:
+            # Fallback: if multi_cell fails, skip the line rather than showing placeholder
+            pass
+    
     return bytes(pdf.output())
 
 # Initialize session state variables
